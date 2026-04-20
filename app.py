@@ -1,7 +1,7 @@
 """
 Daily News + English Word Learner
 - NewsAPI로 관심 분야 뉴스를 가져오고
-- Gemini(gemini-2.5-flash)로 구조화된 한국어 요약 + 난이도별 핵심 영단어 5개 추출
+- Groq(llama-3.3-70b-versatile)으로 구조화된 한국어 요약 + 난이도별 핵심 영단어 5개 추출
 """
 
 DIFFICULTY_OPTIONS = ["초급", "중급", "고급"]
@@ -110,19 +110,19 @@ import os
 import random
 from datetime import datetime
 
-import google.generativeai as genai
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+from groq import Groq
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY_2 = os.getenv("GROQ_API_KEY_2")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
 NEWS_API_URL = "https://newsapi.org/v2/everything"
-GEMINI_MODEL = "gemini-2.5-flash"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
 def _is_quota_error(exc: Exception) -> bool:
@@ -132,41 +132,41 @@ def _is_quota_error(exc: Exception) -> bool:
     return any(k in msg for k in keywords)
 
 
-def call_gemini_json(
+def call_groq_json(
     system_prompt: str,
     user_prompt: str,
     temperature: float = 0.4,
 ) -> str | None:
     """첫 번째 키로 호출하고, 429 등 쿼터 초과 시 두 번째 키로 자동 재시도."""
-    keys = [k for k in (GEMINI_API_KEY, GEMINI_API_KEY_2) if k]
+    keys = [k for k in (GROQ_API_KEY, GROQ_API_KEY_2) if k]
     if not keys:
-        st.error("GEMINI_API_KEY가 설정되지 않았습니다. .env 파일을 확인해주세요.")
+        st.error("GROQ_API_KEY가 설정되지 않았습니다. .env 파일을 확인해주세요.")
         return None
 
     last_exc: Exception | None = None
     for i, key in enumerate(keys):
         try:
-            genai.configure(api_key=key)
-            model = genai.GenerativeModel(
-                model_name=GEMINI_MODEL,
-                system_instruction=system_prompt,
-                generation_config={
-                    "temperature": temperature,
-                    "response_mime_type": "application/json",
-                },
+            client = Groq(api_key=key)
+            response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=temperature,
             )
-            response = model.generate_content(user_prompt)
-            return (response.text or "").strip()
+            return (response.choices[0].message.content or "").strip()
         except Exception as exc:
             last_exc = exc
             if _is_quota_error(exc) and i < len(keys) - 1:
                 st.warning(
-                    f"🔁 첫 번째 API 키 쿼터 초과 — 두 번째 키(GEMINI_API_KEY_2)로 재시도합니다."
+                    "🔁 첫 번째 API 키 쿼터 초과 — 두 번째 키(GROQ_API_KEY_2)로 재시도합니다."
                 )
                 continue
             break
 
-    st.error(f"Gemini API 호출 중 오류: {last_exc}")
+    st.error(f"Groq API 호출 중 오류: {last_exc}")
     return None
 
 
@@ -544,13 +544,13 @@ def analyze_article(
 }}
 """
 
-    raw = call_gemini_json(system_prompt, user_prompt, temperature=0.4)
+    raw = call_groq_json(system_prompt, user_prompt, temperature=0.4)
     if raw is None:
         return None
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        st.error("Gemini 응답을 JSON으로 파싱하지 못했습니다.")
+        st.error("Groq 응답을 JSON으로 파싱하지 못했습니다.")
         return None
 
     return {
@@ -561,7 +561,7 @@ def analyze_article(
 
 
 def _normalize_summary(summary) -> dict:
-    """Gemini 응답의 summary를 항상 {key_points, background, significance} 단락 문자열로 정리."""
+    """Groq 응답의 summary를 항상 {key_points, background, significance} 단락 문자열로 정리."""
 
     def _to_paragraph(value) -> str:
         if value is None:
@@ -676,7 +676,7 @@ def render_analysis(idx: int, analysis: dict, article_title: str = "") -> None:
 
 
 def generate_quiz(word_items: list[dict], n_questions: int = 5) -> list[dict] | None:
-    """외운 단어들로 Gemini에게 4지선다 퀴즈를 생성 요청."""
+    """외운 단어들로 Groq에게 4지선다 퀴즈를 생성 요청."""
     if len(word_items) < 4:
         return None
 
@@ -725,13 +725,13 @@ def generate_quiz(word_items: list[dict], n_questions: int = 5) -> list[dict] | 
 }}
 """
 
-    raw = call_gemini_json(system_prompt, user_prompt, temperature=0.8)
+    raw = call_groq_json(system_prompt, user_prompt, temperature=0.8)
     if raw is None:
         return None
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        st.error("Gemini 퀴즈 응답을 JSON으로 파싱하지 못했습니다.")
+        st.error("Groq 퀴즈 응답을 JSON으로 파싱하지 못했습니다.")
         return None
 
     questions = parsed.get("questions", [])
