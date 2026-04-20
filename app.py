@@ -108,6 +108,7 @@ DIFFICULTY_GUIDE = {
 import json
 import os
 import random
+import re
 from datetime import datetime
 
 import requests
@@ -130,6 +131,13 @@ def _is_quota_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     keywords = ("429", "quota", "resource_exhausted", "rate limit", "ratelimit", "exceeded")
     return any(k in msg for k in keywords)
+
+
+def _strip_code_fences(text: str) -> str:
+    """모델이 실수로 ```json ... ``` 코드블록에 JSON을 감싸 반환해도 파싱 가능하도록 제거."""
+    text = re.sub(r"```json\s*", "", text)
+    text = re.sub(r"```\s*", "", text)
+    return text.strip()
 
 
 def call_groq_json(
@@ -156,7 +164,8 @@ def call_groq_json(
                 response_format={"type": "json_object"},
                 temperature=temperature,
             )
-            return (response.choices[0].message.content or "").strip()
+            raw = response.choices[0].message.content or ""
+            return _strip_code_fences(raw)
         except Exception as exc:
             last_exc = exc
             if _is_quota_error(exc) and i < len(keys) - 1:
