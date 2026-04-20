@@ -1,7 +1,7 @@
 """
 Daily News + English Word Learner
 - NewsAPI로 관심 분야 뉴스를 가져오고
-- Gemini(gemini-1.5-flash)로 구조화된 한국어 요약 + 난이도별 핵심 영단어 5개 추출
+- Gemini(gemini-2.5-flash)로 구조화된 한국어 요약 + 난이도별 핵심 영단어 5개 추출
 """
 
 DIFFICULTY_OPTIONS = ["초급", "중급", "고급"]
@@ -107,6 +107,7 @@ DIFFICULTY_GUIDE = {
 
 import json
 import os
+import random
 from datetime import datetime
 
 import google.generativeai as genai
@@ -117,20 +118,319 @@ from dotenv import load_dotenv
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
 NEWS_API_URL = "https://newsapi.org/v2/everything"
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+
+def _is_quota_error(exc: Exception) -> bool:
+    """429 / quota / rate-limit 계열 오류인지 판별."""
+    msg = str(exc).lower()
+    keywords = ("429", "quota", "resource_exhausted", "rate limit", "ratelimit", "exceeded")
+    return any(k in msg for k in keywords)
+
+
+def call_gemini_json(
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.4,
+) -> str | None:
+    """첫 번째 키로 호출하고, 429 등 쿼터 초과 시 두 번째 키로 자동 재시도."""
+    keys = [k for k in (GEMINI_API_KEY, GEMINI_API_KEY_2) if k]
+    if not keys:
+        st.error("GEMINI_API_KEY가 설정되지 않았습니다. .env 파일을 확인해주세요.")
+        return None
+
+    last_exc: Exception | None = None
+    for i, key in enumerate(keys):
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel(
+                model_name=GEMINI_MODEL,
+                system_instruction=system_prompt,
+                generation_config={
+                    "temperature": temperature,
+                    "response_mime_type": "application/json",
+                },
+            )
+            response = model.generate_content(user_prompt)
+            return (response.text or "").strip()
+        except Exception as exc:
+            last_exc = exc
+            if _is_quota_error(exc) and i < len(keys) - 1:
+                st.warning(
+                    f"🔁 첫 번째 API 키 쿼터 초과 — 두 번째 키(GEMINI_API_KEY_2)로 재시도합니다."
+                )
+                continue
+            break
+
+    st.error(f"Gemini API 호출 중 오류: {last_exc}")
+    return None
 
 
 st.set_page_config(
-    page_title="Daily News + English Word Learner",
+    page_title="NewsVoca",
     page_icon="📰",
     layout="centered",
 )
+
+
+def inject_custom_css() -> None:
+    """NewsVoca 전용 스타일을 주입 (Streamlit 기본 UI 숨김 + 모던 카드/버튼/탭)."""
+    st.markdown(
+        """
+        <style>
+        @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+        /* ─── Streamlit 기본 UI 숨김 ─────────────────────── */
+        #MainMenu { visibility: hidden; }
+        footer { visibility: hidden; }
+        header[data-testid="stHeader"] { display: none; }
+        [data-testid="stToolbar"] { display: none; }
+
+        /* ─── 전역 타이포 & 배경 ─────────────────────── */
+        html, body, .stApp, [class*="css"] {
+            font-family: 'Pretendard', 'Inter', -apple-system, BlinkMacSystemFont,
+                         'Segoe UI', Roboto, sans-serif;
+            color: #1f2937;
+        }
+        .stApp {
+            background-color: #f8f9fa;
+        }
+        .main .block-container {
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+            max-width: 1100px;
+        }
+
+        /* ─── 앱 헤더 ─────────────────────── */
+        .nv-header {
+            padding: 0.25rem 0 1.1rem 0;
+            margin-bottom: 1.25rem;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .nv-brand {
+            display: flex;
+            align-items: baseline;
+            gap: 0.55rem;
+            margin: 0;
+        }
+        .nv-logo {
+            font-size: 1.6rem;
+            line-height: 1;
+        }
+        .nv-title {
+            font-size: 2.1rem;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            color: #111827;
+            margin: 0;
+            line-height: 1.1;
+        }
+        .nv-subtitle {
+            margin: 0.3rem 0 0 0;
+            color: #6b7280;
+            font-size: 0.95rem;
+            font-weight: 500;
+        }
+
+        /* ─── 카드(bordered container) ─────────────────────── */
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            background: #ffffff;
+            border: 1px solid #e5e7eb !important;
+            border-radius: 14px !important;
+            padding: 1.25rem 1.4rem !important;
+            box-shadow: 0 1px 2px rgba(17, 24, 39, 0.04),
+                        0 4px 14px rgba(17, 24, 39, 0.04);
+            transition: box-shadow .2s ease, transform .15s ease, border-color .2s ease;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"]:hover {
+            box-shadow: 0 2px 6px rgba(17, 24, 39, 0.06),
+                        0 10px 28px rgba(17, 24, 39, 0.06);
+            border-color: #d1d5db !important;
+        }
+        /* 중첩 카드(단어/analysis 내부)는 그림자를 살짝 약하게 */
+        [data-testid="stVerticalBlockBorderWrapper"]
+            [data-testid="stVerticalBlockBorderWrapper"] {
+            box-shadow: none;
+            background: #fafbfc;
+            border-radius: 10px !important;
+            padding: 0.9rem 1.05rem !important;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"]
+            [data-testid="stVerticalBlockBorderWrapper"]:hover {
+            background: #f3f4f6;
+            box-shadow: none;
+        }
+
+        /* 카드 내부 h3(뉴스 제목) 강조 */
+        [data-testid="stVerticalBlockBorderWrapper"] h3 {
+            font-size: 1.22rem;
+            font-weight: 700;
+            color: #111827;
+            line-height: 1.45;
+            margin: 0 0 0.4rem 0 !important;
+            letter-spacing: -0.01em;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"] h4 {
+            font-size: 1rem;
+            font-weight: 700;
+            color: #1f2937;
+            margin-top: 1rem !important;
+            margin-bottom: 0.35rem !important;
+        }
+
+        /* 캡션(출처·날짜·예문) 회색 */
+        [data-testid="stCaptionContainer"],
+        .stCaption, small {
+            color: #6b7280 !important;
+            font-size: 0.83rem !important;
+        }
+
+        /* ─── 버튼 ─────────────────────── */
+        .stButton, .stDownloadButton {
+            width: 100%;
+        }
+        .stButton > button, .stDownloadButton > button {
+            border-radius: 10px;
+            font-weight: 500;
+            padding: 0.55rem 1rem;
+            border: 1px solid #e5e7eb;
+            background: #ffffff;
+            color: #374151;
+            transition: all .15s ease;
+            box-shadow: none;
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            white-space: nowrap;
+        }
+        .stButton > button > div,
+        .stButton > button p {
+            width: auto !important;
+            margin: 0 !important;
+            text-align: center !important;
+            white-space: nowrap !important;
+        }
+        .stButton > button:hover {
+            border-color: #9ca3af;
+            background: #f9fafb;
+            color: #111827;
+        }
+        .stButton > button:active { transform: translateY(1px); }
+        .stButton > button:focus:not(:active) {
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+        }
+        /* Primary 버튼 (선택된 분야/퀴즈 생성 등) */
+        .stButton > button[kind="primary"] {
+            background: #2563eb;
+            color: #ffffff;
+            border-color: #2563eb;
+            font-weight: 600;
+            box-shadow: 0 2px 6px rgba(37, 99, 235, 0.25);
+        }
+        .stButton > button[kind="primary"]:hover {
+            background: #1d4ed8;
+            border-color: #1d4ed8;
+            color: #ffffff;
+        }
+
+        /* ─── 탭 ─────────────────────── */
+        .stTabs [data-baseweb="tab-list"] {
+            display: flex;
+            width: 100%;
+            gap: 0;
+            border-bottom: 1px solid #e5e7eb;
+            margin-bottom: 1.2rem;
+        }
+        .stTabs [data-baseweb="tab"] {
+            flex: 1 1 0;
+            justify-content: center;
+            padding: 0.85rem 1.2rem;
+            font-size: 1.05rem;
+            font-weight: 500;
+            color: #6b7280;
+            background: transparent;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+        }
+        .stTabs [data-baseweb="tab"] [data-testid="stMarkdownContainer"] p {
+            font-size: 1.05rem !important;
+            margin: 0 !important;
+        }
+        .stTabs [data-baseweb="tab"]:hover { color: #111827; }
+        .stTabs [aria-selected="true"] {
+            color: #2563eb !important;
+            border-bottom: 2px solid #2563eb !important;
+            font-weight: 600;
+        }
+
+        /* ─── 입력/선택 ─────────────────────── */
+        [data-baseweb="select"] > div,
+        .stTextInput > div > div,
+        .stNumberInput > div > div {
+            border-radius: 10px !important;
+            border-color: #e5e7eb !important;
+        }
+
+        /* ─── Metric ─────────────────────── */
+        [data-testid="stMetric"] {
+            background: #ffffff;
+            padding: 0.9rem 1.1rem;
+            border-radius: 12px;
+            border: 1px solid #e5e7eb;
+            box-shadow: 0 1px 2px rgba(17, 24, 39, 0.03);
+        }
+        [data-testid="stMetricValue"] {
+            font-size: 1.7rem !important;
+            font-weight: 700;
+            color: #111827;
+        }
+        [data-testid="stMetricLabel"] { color: #6b7280; }
+
+        /* ─── 사이드바 ─────────────────────── */
+        [data-testid="stSidebar"] {
+            background-color: #ffffff;
+            border-right: 1px solid #eceff3;
+        }
+        [data-testid="stSidebar"] .block-container {
+            padding-top: 1.5rem;
+        }
+        [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
+            font-weight: 700;
+            color: #111827;
+            letter-spacing: -0.01em;
+        }
+        [data-testid="stSidebar"] [data-testid="stExpander"] {
+            border: none;
+            background: transparent;
+        }
+        [data-testid="stSidebar"] [data-testid="stExpander"] summary {
+            font-weight: 600;
+            color: #1f2937;
+        }
+
+        /* ─── Info / Warning / Success ─────────────────────── */
+        .stAlert {
+            border-radius: 12px;
+            border: 1px solid #e5e7eb;
+        }
+
+        /* ─── 구분선 ─────────────────────── */
+        hr {
+            border: none;
+            border-top: 1px solid #eef0f3;
+            margin: 1rem 0;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def init_session_state() -> None:
@@ -147,6 +447,15 @@ def init_session_state() -> None:
         # {(article_index, word): {"word", "meaning", "article_title"}}
         # 키가 존재하면 외운 단어로 간주하고, 토글 시 키를 제거합니다.
         st.session_state.memorized = {}
+    if "quiz_stats" not in st.session_state:
+        # {word: {"correct": int, "wrong": int}}
+        st.session_state.quiz_stats = {}
+    if "quiz_history" not in st.session_state:
+        # [{"timestamp": str, "score": int, "total": int}]
+        st.session_state.quiz_history = []
+    if "current_quiz" not in st.session_state:
+        # {"questions": [...], "answers": [int|None, ...], "submitted": bool}
+        st.session_state.current_quiz = None
 
 
 def fetch_news(query: str, page_size: int = 5, sources: str | None = None) -> list[dict]:
@@ -183,10 +492,6 @@ def analyze_article(
     content: str,
     difficulty: str = "중급",
 ) -> dict | None:
-    if not GEMINI_API_KEY:
-        st.error("GEMINI_API_KEY가 설정되지 않았습니다. .env 파일을 확인해주세요.")
-        return None
-
     article_text = "\n".join(
         part for part in [title, description, content] if part
     )
@@ -239,21 +544,9 @@ def analyze_article(
 }}
 """
 
-    try:
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            system_instruction=system_prompt,
-            generation_config={
-                "temperature": 0.4,
-                "response_mime_type": "application/json",
-            },
-        )
-        response = model.generate_content(user_prompt)
-    except Exception as exc:
-        st.error(f"Gemini API 호출 중 오류: {exc}")
+    raw = call_gemini_json(system_prompt, user_prompt, temperature=0.4)
+    if raw is None:
         return None
-
-    raw = (response.text or "").strip()
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
@@ -382,6 +675,256 @@ def render_analysis(idx: int, analysis: dict, article_title: str = "") -> None:
                     st.rerun()
 
 
+def generate_quiz(word_items: list[dict], n_questions: int = 5) -> list[dict] | None:
+    """외운 단어들로 Gemini에게 4지선다 퀴즈를 생성 요청."""
+    if len(word_items) < 4:
+        return None
+
+    n_questions = min(n_questions, len(word_items))
+    selected = random.sample(word_items, n_questions)
+
+    word_list_text = "\n".join(
+        f"- {w['word']}: {w['meaning']}" for w in selected
+    )
+    other_meanings = [w["meaning"] for w in word_items]
+
+    system_prompt = (
+        "You are a vocabulary quiz generator for Korean learners of English. "
+        "Always respond in valid JSON only."
+    )
+    user_prompt = f"""다음은 학습자가 '외운 단어'로 표시한 영단어 목록입니다.
+각 단어에 대해 4지선다 객관식 퀴즈를 만들어 주세요.
+
+[외운 단어 목록]
+{word_list_text}
+
+[참고용 다른 뜻 풀(distractor 아이디어)]
+{", ".join(other_meanings)}
+
+[작업 규칙]
+1) 위 목록에 있는 단어 {n_questions}개 각각에 대해 문제를 1개씩 만드세요 (총 {n_questions}문제).
+2) 질문 형식: "'{{word}}'의 뜻으로 가장 알맞은 것은?"
+3) 4개 선택지 중 **정답은 그 단어의 실제 한국어 뜻**입니다.
+4) 나머지 3개 오답(distractor)은 다음 규칙으로 만드세요:
+   - 같은 품사·비슷한 의미 영역에서 그럴듯하지만 분명히 다른 한국어 뜻을 생성
+   - 정답과 글자 수나 느낌이 너무 다르지 않게, 한국어 자연스러운 표현으로
+   - 정답과 의미가 거의 같은 동의어는 오답으로 쓰지 말 것 (학습자가 혼동해 억울하지 않도록)
+5) 선택지 배열 순서는 섞어서 정답 위치를 무작위로 분산(0~3)시키세요.
+6) correct_index는 choices 배열 내 정답의 0-based 인덱스입니다.
+
+[출력 형식 - JSON only]
+{{
+  "questions": [
+    {{
+      "word": "영단어",
+      "correct_meaning": "실제 한국어 뜻",
+      "choices": ["선택지1", "선택지2", "선택지3", "선택지4"],
+      "correct_index": 0
+    }}
+  ]
+}}
+"""
+
+    raw = call_gemini_json(system_prompt, user_prompt, temperature=0.8)
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        st.error("Gemini 퀴즈 응답을 JSON으로 파싱하지 못했습니다.")
+        return None
+
+    questions = parsed.get("questions", [])
+    cleaned: list[dict] = []
+    for q in questions:
+        word = q.get("word", "")
+        choices = q.get("choices", [])
+        correct_index = q.get("correct_index", 0)
+        if not word or not isinstance(choices, list) or len(choices) != 4:
+            continue
+        try:
+            correct_index = int(correct_index)
+        except (TypeError, ValueError):
+            correct_index = 0
+        if not 0 <= correct_index < 4:
+            correct_index = 0
+        cleaned.append({
+            "word": word,
+            "choices": choices,
+            "correct_index": correct_index,
+            "correct_meaning": q.get("correct_meaning", choices[correct_index]),
+        })
+    return cleaned or None
+
+
+def render_quiz_tab() -> None:
+    st.subheader("🎯 외운 단어 퀴즈")
+    memorized_items = list(st.session_state.memorized.values())
+
+    if len(memorized_items) < 4:
+        st.info(
+            f"퀴즈를 만들려면 최소 **4개** 이상의 외운 단어가 필요해요. "
+            f"현재 외운 단어: **{len(memorized_items)}개**\n\n"
+            f"뉴스 탭에서 단어를 더 외워보세요!"
+        )
+        return
+
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        st.caption(f"현재 외운 단어 **{len(memorized_items)}개** 중 랜덤으로 문제를 출제합니다.")
+    with col_b:
+        max_n = min(10, len(memorized_items))
+        n_questions = st.number_input(
+            "문제 수",
+            min_value=4,
+            max_value=max_n,
+            value=min(5, max_n),
+            step=1,
+            label_visibility="collapsed",
+        )
+
+    new_col, reset_col = st.columns(2)
+    with new_col:
+        if st.button("🎲 새 퀴즈 생성", use_container_width=True, type="primary"):
+            with st.spinner("AI가 퀴즈를 생성하는 중..."):
+                questions = generate_quiz(memorized_items, n_questions=int(n_questions))
+            if questions:
+                st.session_state.current_quiz = {
+                    "questions": questions,
+                    "answers": [None] * len(questions),
+                    "submitted": False,
+                }
+                st.rerun()
+    with reset_col:
+        if st.session_state.current_quiz and st.button(
+            "🗑️ 퀴즈 초기화", use_container_width=True
+        ):
+            st.session_state.current_quiz = None
+            st.rerun()
+
+    quiz = st.session_state.current_quiz
+    if not quiz:
+        st.caption("위의 **새 퀴즈 생성** 버튼을 눌러 퀴즈를 시작하세요.")
+        return
+
+    questions = quiz["questions"]
+    submitted = quiz["submitted"]
+
+    st.divider()
+    st.markdown(f"### 문제 ({len(questions)}개)")
+
+    for i, q in enumerate(questions):
+        with st.container(border=True):
+            st.markdown(f"**Q{i + 1}. '{q['word']}'의 뜻으로 가장 알맞은 것은?**")
+            key = f"quiz_q_{i}"
+            if submitted:
+                user_idx = quiz["answers"][i]
+                correct_idx = q["correct_index"]
+                for j, choice in enumerate(q["choices"]):
+                    if j == correct_idx:
+                        st.markdown(f"- ✅ **{choice}** (정답)")
+                    elif j == user_idx and user_idx != correct_idx:
+                        st.markdown(f"- ❌ ~~{choice}~~ (내가 선택)")
+                    else:
+                        st.markdown(f"- {choice}")
+            else:
+                choice = st.radio(
+                    "보기",
+                    options=list(range(4)),
+                    format_func=lambda j, q=q: f"{['A','B','C','D'][j]}. {q['choices'][j]}",
+                    index=quiz["answers"][i] if quiz["answers"][i] is not None else None,
+                    key=key,
+                    label_visibility="collapsed",
+                )
+                quiz["answers"][i] = choice
+
+    if not submitted:
+        if st.button("✅ 제출하기", use_container_width=True, type="primary"):
+            unanswered = [i + 1 for i, a in enumerate(quiz["answers"]) if a is None]
+            if unanswered:
+                st.warning(f"아직 답하지 않은 문제가 있어요: {unanswered}")
+            else:
+                score = 0
+                for i, q in enumerate(questions):
+                    word = q["word"]
+                    stat = st.session_state.quiz_stats.setdefault(
+                        word, {"correct": 0, "wrong": 0}
+                    )
+                    if quiz["answers"][i] == q["correct_index"]:
+                        stat["correct"] += 1
+                        score += 1
+                    else:
+                        stat["wrong"] += 1
+                quiz["submitted"] = True
+                quiz["score"] = score
+                st.session_state.quiz_history.append({
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "score": score,
+                    "total": len(questions),
+                })
+                st.rerun()
+    else:
+        score = quiz.get("score", 0)
+        total = len(questions)
+        pct = int(round(score / total * 100)) if total else 0
+        st.success(f"🎉 결과: **{score} / {total}** ({pct}%)")
+
+
+def render_stats_tab() -> None:
+    st.subheader("📊 학습 통계")
+
+    memorized_items = list(st.session_state.memorized.values())
+    history = st.session_state.quiz_history
+    stats = st.session_state.quiz_stats
+
+    quiz_count = len(history)
+    total_correct = sum(h["score"] for h in history)
+    total_questions = sum(h["total"] for h in history)
+    avg_accuracy = (
+        int(round(total_correct / total_questions * 100)) if total_questions else 0
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("전체 외운 단어", f"{len(memorized_items)}")
+    c2.metric("퀴즈 횟수", f"{quiz_count}")
+    c3.metric("평균 정답률", f"{avg_accuracy}%")
+
+    st.divider()
+    st.markdown("#### 🧩 취약 단어 TOP 5 (틀린 횟수 기준)")
+    weak_sorted = sorted(
+        ((w, s["wrong"], s["correct"]) for w, s in stats.items() if s["wrong"] > 0),
+        key=lambda x: (-x[1], x[0]),
+    )[:5]
+    if not weak_sorted:
+        st.caption("아직 틀린 단어가 없어요. 퀴즈를 풀어보세요!")
+    else:
+        for word, wrong, correct in weak_sorted:
+            total = wrong + correct
+            acc = int(round(correct / total * 100)) if total else 0
+            meaning = ""
+            for item in memorized_items:
+                if item.get("word") == word:
+                    meaning = item.get("meaning", "")
+                    break
+            with st.container(border=True):
+                st.markdown(
+                    f"**{word}**"
+                    + (f" — {meaning}" if meaning else "")
+                )
+                st.caption(f"❌ 틀림 {wrong}회 · ✅ 맞음 {correct}회 · 정답률 {acc}%")
+
+    st.divider()
+    st.markdown("#### 🕒 최근 퀴즈 기록")
+    if not history:
+        st.caption("아직 푼 퀴즈가 없어요.")
+    else:
+        for h in reversed(history[-10:]):
+            total = h["total"]
+            score = h["score"]
+            pct = int(round(score / total * 100)) if total else 0
+            st.markdown(f"- `{h['timestamp']}`  →  **{score} / {total}** ({pct}%)")
+
+
 def render_sidebar() -> None:
     with st.sidebar:
         st.header("ℹ️ 사용 안내")
@@ -403,59 +946,88 @@ def render_sidebar() -> None:
                     word = item.get("word", "")
                     meaning = item.get("meaning", "")
                     src = item.get("article_title", "")
-                    st.markdown(f"**{word}** — {meaning}")
-                    if src:
-                        st.caption(f"📰 {src}")
-                    st.markdown("---")
+                    with st.container(border=True):
+                        st.markdown(f"**{word}** — {meaning}")
+                        if src:
+                            st.caption(f"📰 {src}")
 
         if st.button("학습 기록 초기화", use_container_width=True):
             st.session_state.memorized = {}
             st.session_state.analysis = {}
+            st.session_state.quiz_stats = {}
+            st.session_state.quiz_history = []
+            st.session_state.current_quiz = None
             st.rerun()
 
 
 def main() -> None:
     init_session_state()
+    inject_custom_css()
 
-    st.title("📰 Daily News + English Word Learner")
-    st.caption("관심 분야의 최신 뉴스로 영어 단어까지 함께 학습해보세요.")
+    st.markdown(
+        """
+        <div class="nv-header">
+            <div class="nv-brand">
+                <span class="nv-logo">📰</span>
+                <h1 class="nv-title">NewsVoca</h1>
+            </div>
+            <p class="nv-subtitle">뉴스로 배우는 영어 단어</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     render_sidebar()
 
-    difficulty = st.selectbox(
-        "단어 난이도",
-        options=DIFFICULTY_OPTIONS,
-        index=DIFFICULTY_OPTIONS.index(st.session_state.difficulty),
-    )
-    st.session_state.difficulty = difficulty
+    tab_news, tab_quiz, tab_stats = st.tabs(["📰 뉴스", "🎯 퀴즈", "📊 통계"])
 
-    st.markdown("**관심 분야 선택**")
-    cat_cols = st.columns(len(CATEGORY_OPTIONS))
-    clicked_key: str | None = None
-    for col, (key, cfg) in zip(cat_cols, CATEGORY_OPTIONS.items()):
-        with col:
-            if st.button(cfg["label"], key=f"cat_{key}", use_container_width=True):
-                clicked_key = key
-
-    if clicked_key:
-        cfg = CATEGORY_OPTIONS[clicked_key]
-        with st.spinner(f"{cfg['label']} 관련 최신 뉴스를 가져오는 중..."):
-            articles = fetch_news(cfg["query"], sources=cfg["sources"])
-        st.session_state.articles = articles
-        st.session_state.last_query = cfg["label"]
-        st.session_state.analysis = {}
-
-    if st.session_state.articles:
-        st.markdown(
-            f"### '{st.session_state.last_query}' 최신 뉴스 "
-            f"{len(st.session_state.articles)}건"
+    with tab_news:
+        difficulty = st.selectbox(
+            "단어 난이도",
+            options=DIFFICULTY_OPTIONS,
+            index=DIFFICULTY_OPTIONS.index(st.session_state.difficulty),
         )
-        for idx, article in enumerate(st.session_state.articles):
-            render_article(idx, article)
-    elif st.session_state.last_query:
-        st.info("검색 결과가 없습니다. 다른 키워드로 시도해보세요.")
-    else:
-        st.info("위 입력창에 관심 분야를 입력하고 검색해보세요.")
+        st.session_state.difficulty = difficulty
+
+        st.markdown("**관심 분야 선택**")
+        cat_cols = st.columns(len(CATEGORY_OPTIONS))
+        clicked_key: str | None = None
+        for col, (key, cfg) in zip(cat_cols, CATEGORY_OPTIONS.items()):
+            with col:
+                is_selected = st.session_state.last_query == cfg["label"]
+                if st.button(
+                    cfg["label"],
+                    key=f"cat_{key}",
+                    use_container_width=True,
+                    type="primary" if is_selected else "secondary",
+                ):
+                    clicked_key = key
+
+        if clicked_key:
+            cfg = CATEGORY_OPTIONS[clicked_key]
+            with st.spinner(f"{cfg['label']} 관련 최신 뉴스를 가져오는 중..."):
+                articles = fetch_news(cfg["query"], sources=cfg["sources"])
+            st.session_state.articles = articles
+            st.session_state.last_query = cfg["label"]
+            st.session_state.analysis = {}
+
+        if st.session_state.articles:
+            st.markdown(
+                f"### '{st.session_state.last_query}' 최신 뉴스 "
+                f"{len(st.session_state.articles)}건"
+            )
+            for idx, article in enumerate(st.session_state.articles):
+                render_article(idx, article)
+        elif st.session_state.last_query:
+            st.info("검색 결과가 없습니다. 다른 키워드로 시도해보세요.")
+        else:
+            st.info("위 입력창에 관심 분야를 입력하고 검색해보세요.")
+
+    with tab_quiz:
+        render_quiz_tab()
+
+    with tab_stats:
+        render_stats_tab()
 
 
 if __name__ == "__main__":
