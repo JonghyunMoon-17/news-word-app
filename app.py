@@ -1,7 +1,7 @@
 """
 Daily News + English Word Learner
 - NewsAPI로 관심 분야 뉴스를 가져오고
-- OpenAI(gpt-4o-mini)로 구조화된 한국어 요약 + 난이도별 핵심 영단어 5개 추출
+- Gemini(gemini-1.5-flash)로 구조화된 한국어 요약 + 난이도별 핵심 영단어 5개 추출
 """
 
 DIFFICULTY_OPTIONS = ["초급", "중급", "고급"]
@@ -109,18 +109,21 @@ import json
 import os
 from datetime import datetime
 
+import google.generativeai as genai
 import requests
 import streamlit as st
 from dotenv import load_dotenv
-from openai import OpenAI
 
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
 NEWS_API_URL = "https://newsapi.org/v2/everything"
-OPENAI_MODEL = "gpt-4o-mini"
+GEMINI_MODEL = "gemini-1.5-flash"
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 
 st.set_page_config(
@@ -180,11 +183,9 @@ def analyze_article(
     content: str,
     difficulty: str = "중급",
 ) -> dict | None:
-    if not OPENAI_API_KEY:
-        st.error("OPENAI_API_KEY가 설정되지 않았습니다. .env 파일을 확인해주세요.")
+    if not GEMINI_API_KEY:
+        st.error("GEMINI_API_KEY가 설정되지 않았습니다. .env 파일을 확인해주세요.")
         return None
-
-    client = OpenAI(api_key=OPENAI_API_KEY)
 
     article_text = "\n".join(
         part for part in [title, description, content] if part
@@ -239,24 +240,24 @@ def analyze_article(
 """
 
     try:
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.4,
+        model = genai.GenerativeModel(
+            model_name=GEMINI_MODEL,
+            system_instruction=system_prompt,
+            generation_config={
+                "temperature": 0.4,
+                "response_mime_type": "application/json",
+            },
         )
+        response = model.generate_content(user_prompt)
     except Exception as exc:
-        st.error(f"OpenAI API 호출 중 오류: {exc}")
+        st.error(f"Gemini API 호출 중 오류: {exc}")
         return None
 
-    raw = response.choices[0].message.content
+    raw = (response.text or "").strip()
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        st.error("OpenAI 응답을 JSON으로 파싱하지 못했습니다.")
+        st.error("Gemini 응답을 JSON으로 파싱하지 못했습니다.")
         return None
 
     return {
@@ -267,7 +268,7 @@ def analyze_article(
 
 
 def _normalize_summary(summary) -> dict:
-    """OpenAI 응답의 summary를 항상 {key_points, background, significance} 단락 문자열로 정리."""
+    """Gemini 응답의 summary를 항상 {key_points, background, significance} 단락 문자열로 정리."""
 
     def _to_paragraph(value) -> str:
         if value is None:
